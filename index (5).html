@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mikrofon Hoparlör</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,Arial,sans-serif;background:#0f1220;color:#eef;min-height:100vh;display:flex;justify-content:center;padding:16px}
+.box{width:100%;max-width:480px}
+h1{font-size:22px;text-align:center}
+.card{background:#1a1f36;border-radius:14px;padding:16px;margin-bottom:14px}
+.code{font-size:44px;letter-spacing:8px;text-align:center;font-weight:700;color:#6ee7b7}
+input{width:100%;padding:12px;font-size:20px;border-radius:10px;border:0;text-align:center;letter-spacing:4px}
+button{padding:12px 16px;font-size:16px;border:0;border-radius:10px;background:#4f46e5;color:#fff;cursor:pointer}
+button.alt{background:#334155}
+button.on{background:#16a34a}
+.full{width:100%;margin-top:8px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #2a3150}
+.row:last-child{border:0}
+.small{font-size:13px;color:#9aa4c7}
+#start{position:fixed;inset:0;background:#0f1220;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:9;padding:20px;text-align:center}
+#start button{font-size:20px;padding:16px 32px}
+</style>
+</head>
+<body>
+<div id="start">
+  <h1>🎤 Mikrofon & Hoparlör</h1>
+  <p class="small">Başlamak için butona dokun (ses izni için gerekli)</p>
+  <button onclick="basla()">Başla</button>
+</div>
+
+<div class="box">
+  <h1>🎤 Mikrofon & Hoparlör</h1>
+
+  <div class="card">
+    <div class="small" style="text-align:center">Bu cihazın kodu</div>
+    <div class="code" id="kod">-----</div>
+  </div>
+
+  <div class="card">
+    <b>Cihaz ekle</b> <span class="small">(en fazla 4 cihaz)</span>
+    <input id="hedef" inputmode="numeric" maxlength="5" placeholder="Diğer cihazın kodu">
+    <button class="full" onclick="cihazEkle()">Bağlan</button>
+    <div class="small" id="durum" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <b>Cihazlar</b>
+    <div id="liste"></div>
+  </div>
+
+  <div class="card">
+    <b>Hoparlör ayarı</b>
+    <div class="small">Ses seviyesi (yükseltme)</div>
+    <input type="range" id="vol" min="0.5" max="5" step="0.1" value="2" style="padding:0">
+    <label style="display:block;margin-top:10px">
+      <input type="checkbox" id="temiz" checked style="width:auto"> Cızırtı temizleme (filtre)
+    </label>
+    <div class="small">Mikrofon cihazında yankı engelleme ve gürültü azaltma otomatik açıktır.</div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const PREFIX = "mikhop-";
+const MAX = 4;
+let peer, myId, conns = {}, micId = null, micStream = null;
+let calls = {}, ctx, gain, chain = null, remoteSrc = null, audioEl = null;
+
+const $ = id => document.getElementById(id);
+const durum = t => $("durum").textContent = t;
+
+function basla() {
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  ctx.resume();
+  $("start").style.display = "none";
+  kurPeer();
+}
+
+function kurPeer() {
+  const kod = String(Math.floor(10000 + Math.random() * 90000));
+  peer = new Peer(PREFIX + kod);
+  peer.on("open", id => { myId = id; $("kod").textContent = kod; ciz(); });
+  peer.on("error", e => {
+    if (e.type === "unavailable-id") { kurPeer(); return; } // kod doluysa yenisini al
+    if (e.type === "peer-unavailable") durum("Bu kodlu cihaz bulunamadı.");
+    else durum("Hata: " + e.type);
+  });
+  peer.on("connection", c => {
+    if (Object.keys(conns).length + 1 >= MAX) { c.on("open", () => c.close()); return; }
+    baglantiKur(c);
+  });
+  peer.on("call", call => {
+    call.answer();
+    call.on("stream", s => uzaktanCal(s));
+    calls[call.peer] = call;
+  });
+}
+
+function kod(id) { return id.replace(PREFIX, ""); }
+
+function cihazEkle() {
+  const k = $("hedef").value.trim();
+  if (!/^\d{5}$/.test(k)) { durum("5 haneli kod yaz."); return; }
+  const id = PREFIX + k;
+  if (id === myId) { durum("Bu zaten bu cihazın kodu."); return; }
+  if (conns[id]) { durum("Zaten bağlı."); return; }
+  if (Object.keys(conns).length + 1 >= MAX) { durum("En fazla 4 cihaz."); return; }
+  durum("Bağlanıyor...");
+  baglantiKur(peer.connect(id, { reliable: true }));
+}
+
+function baglantiKur(c) {
+  c.on("open", () => {
+    if (conns[c.peer]) { c.close(); return; }
+    conns[c.peer] = c;
+    durum("Bağlandı: " + kod(c.peer));
+    c.send({ t: "hello", peers: Object.keys(conns).filter(p => p !== c.peer), mic: micId });
+    if (micId === myId && micStream) mikrofonuGonder(c.peer);
+    ciz();
+  });
+  c.on("data", m => {
+    if (m.t === "hello") {
+      m.peers.forEach(p => {
+        if (p !== myId && !conns[p] && Object.keys(conns).length + 1 < MAX)
+          baglantiKur(peer.connect(p, { reliable: true }));
+      });
+      if (m.mic && !micId) micAyarla(m.mic, false);
+    } else if (m.t === "setMic") {
+      micAyarla(m.id, false);
+    }
+  });
+  c.on("close", () => {
+    delete conns[c.peer];
+    if (calls[c.peer]) { calls[c.peer].close(); delete calls[c.peer]; }
+    if (micId === c.peer) { micId = null; sesiDurdur(); }
+    ciz();
+  });
+}
+
+function herkeseGonder(m) { Object.values(conns).forEach(c => c.open && c.send(m)); }
+
+function micSec(id) { micAyarla(id, true); }
+
+async function micAyarla(id, yay) {
+  // eski durumu temizle
+  sesiDurdur();
+  Object.values(calls).forEach(c => c.close()); calls = {};
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  micId = id;
+  if (yay) herkeseGonder({ t: "setMic", id });
+  if (id === myId) {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+                 channelCount: 1 }
+      });
+      Object.keys(conns).forEach(mikrofonuGonder);
+    } catch (e) {
+      durum("Mikrofon izni verilmedi.");
+      micId = null;
+    }
+  }
+  ciz();
+}
+
+function mikrofonuGonder(pid) {
+  if (!micStream) return;
+  const call = peer.call(pid, micStream);
+  calls[pid] = call;
+}
+
+function sesiDurdur() {
+  if (chain) { try { chain.forEach(n => n.disconnect()); } catch (e) {} chain = null; }
+  if (audioEl) { audioEl.srcObject = null; audioEl = null; }
+}
+
+function uzaktanCal(stream) {
+  sesiDurdur();
+  // Chrome'un akışı başlatması için sessiz audio elemanı
+  audioEl = new Audio();
+  audioEl.muted = true;
+  audioEl.srcObject = stream;
+  audioEl.play().catch(() => {});
+
+  ctx.resume();
+  const src = ctx.createMediaStreamSource(stream);
+  const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 120;
+  const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 7000;
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -24; comp.ratio.value = 6; comp.attack.value = 0.003; comp.release.value = 0.25;
+  gain = ctx.createGain();
+  gain.gain.value = parseFloat($("vol").value);
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -3; limiter.ratio.value = 20; limiter.knee.value = 0;
+
+  chain = [src, hp, lp, comp, gain, limiter];
+  const temiz = $("temiz").checked;
+  let prev = src;
+  const dizi = temiz ? [hp, lp, comp, gain, limiter] : [comp, gain, limiter];
+  dizi.forEach(n => { prev.connect(n); prev = n; });
+  prev.connect(ctx.destination);
+}
+
+$("vol").addEventListener("input", () => { if (gain) gain.gain.value = parseFloat($("vol").value); });
+$("temiz").addEventListener("change", () => {
+  const live = Object.values(calls).find(c => c.remoteStream);
+  if (live) uzaktanCal(live.remoteStream);
+});
+
+function ciz() {
+  const l = $("liste");
+  const ids = [myId, ...Object.keys(conns)].filter(Boolean);
+  l.innerHTML = "";
+  ids.forEach(id => {
+    const r = document.createElement("div"); r.className = "row";
+    const ben = id === myId;
+    const ad = document.createElement("span");
+    ad.textContent = (ben ? "Bu cihaz " : "Cihaz ") + kod(id) + (micId === id ? "  🎤" : "  🔊");
+    const b = document.createElement("button");
+    b.textContent = micId === id ? "Mikrofon" : "Mikrofon yap";
+    b.className = micId === id ? "on" : "alt";
+    b.onclick = () => micSec(id);
+    r.append(ad, b); l.append(r);
+  });
+}
+</script>
+</body>
+</html>
