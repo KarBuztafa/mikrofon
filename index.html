@@ -11,14 +11,19 @@ body{margin:0;font-family:system-ui,Arial,sans-serif;background:#0f1220;color:#e
 h1{font-size:22px;text-align:center}
 .card{background:#1a1f36;border-radius:14px;padding:16px;margin-bottom:14px}
 .code{font-size:44px;letter-spacing:8px;text-align:center;font-weight:700;color:#6ee7b7}
-input{width:100%;padding:12px;font-size:20px;border-radius:10px;border:0;text-align:center;letter-spacing:4px}
-button{padding:12px 16px;font-size:16px;border:0;border-radius:10px;background:#4f46e5;color:#fff;cursor:pointer}
+input[type=text]{width:100%;padding:12px;font-size:20px;border-radius:10px;border:0;text-align:center;letter-spacing:4px}
+button{padding:10px 14px;font-size:15px;border:0;border-radius:10px;background:#4f46e5;color:#fff;cursor:pointer}
 button.alt{background:#334155}
 button.on{background:#16a34a}
-.full{width:100%;margin-top:8px}
+button.red{background:#b91c1c}
+.full{width:100%;margin-top:8px;padding:12px}
 .row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #2a3150}
 .row:last-child{border:0}
+.btns{display:flex;gap:6px}
 .small{font-size:13px;color:#9aa4c7}
+.bar{height:10px;background:#2a3150;border-radius:6px;overflow:hidden;margin:6px 0}
+#seviye{height:100%;width:0;background:#6ee7b7;transition:width .05s}
+label.l{display:block;margin-top:10px}
 #start{position:fixed;inset:0;background:#0f1220;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:9;padding:20px;text-align:center}
 #start button{font-size:20px;padding:16px 32px}
 </style>
@@ -40,7 +45,7 @@ button.on{background:#16a34a}
 
   <div class="card">
     <b>Cihaz ekle</b> <span class="small">(en fazla 4 cihaz)</span>
-    <input id="hedef" inputmode="numeric" maxlength="5" placeholder="Diğer cihazın kodu">
+    <input type="text" id="hedef" inputmode="numeric" maxlength="5" placeholder="Diğer cihazın kodu">
     <button class="full" onclick="cihazEkle()">Bağlan</button>
     <div class="small" id="durum" style="margin-top:8px"></div>
   </div>
@@ -48,16 +53,23 @@ button.on{background:#16a34a}
   <div class="card">
     <b>Cihazlar</b>
     <div id="liste"></div>
+    <button class="full red" onclick="hepsindenAyril()">Tüm bağlantıları kes</button>
   </div>
 
   <div class="card">
-    <b>Hoparlör ayarı</b>
-    <div class="small">Ses seviyesi (yükseltme)</div>
-    <input type="range" id="vol" min="0.5" max="5" step="0.1" value="2" style="padding:0">
-    <label style="display:block;margin-top:10px">
-      <input type="checkbox" id="temiz" checked style="width:auto"> Cızırtı temizleme (filtre)
-    </label>
-    <div class="small">Mikrofon cihazında yankı engelleme ve gürültü azaltma otomatik açıktır.</div>
+    <b>Hoparlör ayarı</b> <span class="small">(mikrofon olmayan cihazlar)</span>
+    <div class="small" style="margin-top:6px">Gelen ses seviyesi</div>
+    <div class="bar"><div id="seviye"></div></div>
+
+    <div class="small">Ses yükseltme</div>
+    <input type="range" id="vol" min="0.5" max="5" step="0.1" value="2" style="width:100%">
+
+    <label class="l"><input type="checkbox" id="temiz" checked> Cızırtı temizleme + sessizlikte kapat</label>
+    <div class="small">Sessizlik eşiği (yüksek = daha çok keser, yankıyı azaltır)</div>
+    <input type="range" id="esik" min="-70" max="-25" step="1" value="-50" style="width:100%">
+
+    <label class="l"><input type="checkbox" id="sessiz"> Bu hoparlörü sessize al</label>
+    <div class="small">Hoparlör mikrofonun hemen yanındaysa yankı (ıslık) olur. Aralarını en az 3-4 metre aç ya da bu cihazı sessize al.</div>
   </div>
 </div>
 
@@ -65,40 +77,43 @@ button.on{background:#16a34a}
 <script>
 const PREFIX = "mikhop-";
 const MAX = 4;
-let peer, myId, conns = {}, micId = null, micStream = null;
-let calls = {}, ctx, gain, chain = null, remoteSrc = null, audioEl = null;
+let peer, myId, conns = {}, micId = null, micVer = 0, micStream = null;
+let calls = {}, ctx, chain = null, audioEl = null, lastStream = null;
+let gainN, gateN, analyser, buf, lastLoud = 0, gateTimer = null;
 
 const $ = id => document.getElementById(id);
 const durum = t => $("durum").textContent = t;
+const kod = id => id.replace(PREFIX, "");
 
 function basla() {
   ctx = new (window.AudioContext || window.webkitAudioContext)();
   ctx.resume();
   $("start").style.display = "none";
   kurPeer();
+  if (navigator.wakeLock) navigator.wakeLock.request("screen").catch(() => {});
 }
 
 function kurPeer() {
-  const kod = String(Math.floor(10000 + Math.random() * 90000));
-  peer = new Peer(PREFIX + kod);
-  peer.on("open", id => { myId = id; $("kod").textContent = kod; ciz(); });
+  const k = String(Math.floor(10000 + Math.random() * 90000));
+  peer = new Peer(PREFIX + k);
+  peer.on("open", id => { myId = id; $("kod").textContent = k; ciz(); });
   peer.on("error", e => {
-    if (e.type === "unavailable-id") { kurPeer(); return; } // kod doluysa yenisini al
+    if (e.type === "unavailable-id") { kurPeer(); return; }
     if (e.type === "peer-unavailable") durum("Bu kodlu cihaz bulunamadı.");
     else durum("Hata: " + e.type);
   });
   peer.on("connection", c => {
-    if (Object.keys(conns).length + 1 >= MAX) { c.on("open", () => c.close()); return; }
-    baglantiKur(c);
+    if (!conns[c.peer] && Object.keys(conns).length + 1 >= MAX) { c.on("open", () => c.close()); return; }
+    baglantiKur(c, false);
   });
   peer.on("call", call => {
+    if (micId && call.peer !== micId) { call.close(); return; }
     call.answer();
-    call.on("stream", s => uzaktanCal(s));
+    if (calls[call.peer] && calls[call.peer] !== call) calls[call.peer].close();
     calls[call.peer] = call;
+    call.on("stream", s => uzaktanCal(s));
   });
 }
-
-function kod(id) { return id.replace(PREFIX, ""); }
 
 function cihazEkle() {
   const k = $("hedef").value.trim();
@@ -108,30 +123,41 @@ function cihazEkle() {
   if (conns[id]) { durum("Zaten bağlı."); return; }
   if (Object.keys(conns).length + 1 >= MAX) { durum("En fazla 4 cihaz."); return; }
   durum("Bağlanıyor...");
-  baglantiKur(peer.connect(id, { reliable: true }));
+  baglantiKur(peer.connect(id, { reliable: true }), true);
 }
 
-function baglantiKur(c) {
-  c.on("open", () => {
-    if (conns[c.peer]) { c.close(); return; }
+function baglantiKur(c, giden) {
+  c._from = giden ? myId : c.peer; // aynı anda iki yönlü bağlanırsa tutarlı seçim için
+  let hazir = false;
+  const acildi = () => {
+    if (hazir) return; hazir = true;
+    const eski = conns[c.peer];
+    if (eski) {
+      if (c._from < eski._from) { delete conns[c.peer]; eski.close(); }
+      else { c.close(); return; }
+    }
     conns[c.peer] = c;
     durum("Bağlandı: " + kod(c.peer));
-    c.send({ t: "hello", peers: Object.keys(conns).filter(p => p !== c.peer), mic: micId });
+    c.send({ t: "hello", peers: Object.keys(conns).filter(p => p !== c.peer), mic: micId, ver: micVer });
     if (micId === myId && micStream) mikrofonuGonder(c.peer);
     ciz();
-  });
+  };
+  c.on("open", acildi);
+  if (c.open) acildi();
+
   c.on("data", m => {
     if (m.t === "hello") {
       m.peers.forEach(p => {
         if (p !== myId && !conns[p] && Object.keys(conns).length + 1 < MAX)
-          baglantiKur(peer.connect(p, { reliable: true }));
+          baglantiKur(peer.connect(p, { reliable: true }), true);
       });
-      if (m.mic && !micId) micAyarla(m.mic, false);
+      if (m.ver > micVer) micAyarla(m.mic, m.ver, c.peer);
     } else if (m.t === "setMic") {
-      micAyarla(m.id, false);
+      if (m.ver >= micVer && !(m.ver === micVer && m.id === micId)) micAyarla(m.id, m.ver, c.peer);
     }
   });
   c.on("close", () => {
+    if (conns[c.peer] !== c) return;
     delete conns[c.peer];
     if (calls[c.peer]) { calls[c.peer].close(); delete calls[c.peer]; }
     if (micId === c.peer) { micId = null; sesiDurdur(); }
@@ -139,92 +165,129 @@ function baglantiKur(c) {
   });
 }
 
-function herkeseGonder(m) { Object.values(conns).forEach(c => c.open && c.send(m)); }
+function gonder(m, haric) {
+  Object.keys(conns).forEach(p => { if (p !== haric && conns[p].open) conns[p].send(m); });
+}
 
-function micSec(id) { micAyarla(id, true); }
+function micSec(id) { micAyarla(id, micVer + 1, null); }
 
-async function micAyarla(id, yay) {
-  // eski durumu temizle
+async function micAyarla(id, ver, kaynak) {
   sesiDurdur();
   Object.values(calls).forEach(c => c.close()); calls = {};
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-  micId = id;
-  if (yay) herkeseGonder({ t: "setMic", id });
+  micId = id; micVer = ver;
+  gonder({ t: "setMic", id, ver }, kaynak); // herkese ilet (kaynağa geri gönderme)
+  ciz();
   if (id === myId) {
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true,
-                 channelCount: 1 }
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 }
       });
+      if (micId !== myId) { micStream.getTracks().forEach(t => t.stop()); micStream = null; return; }
       Object.keys(conns).forEach(mikrofonuGonder);
     } catch (e) {
       durum("Mikrofon izni verilmedi.");
-      micId = null;
     }
   }
-  ciz();
 }
 
 function mikrofonuGonder(pid) {
   if (!micStream) return;
-  const call = peer.call(pid, micStream);
-  calls[pid] = call;
+  calls[pid] = peer.call(pid, micStream);
 }
 
+function ayril(id) {
+  const c = conns[id];
+  if (!c) return;
+  delete conns[id];
+  if (calls[id]) { calls[id].close(); delete calls[id]; }
+  c.close();
+  if (micId === id) { micId = null; sesiDurdur(); }
+  ciz();
+}
+function hepsindenAyril() { Object.keys(conns).forEach(ayril); durum("Tüm bağlantılar kesildi."); }
+
 function sesiDurdur() {
-  if (chain) { try { chain.forEach(n => n.disconnect()); } catch (e) {} chain = null; }
+  if (gateTimer) { clearInterval(gateTimer); gateTimer = null; }
+  if (chain) { chain.forEach(n => { try { n.disconnect(); } catch (e) {} }); chain = null; }
   if (audioEl) { audioEl.srcObject = null; audioEl = null; }
+  lastStream = null; analyser = null;
+  $("seviye").style.width = "0%";
 }
 
 function uzaktanCal(stream) {
   sesiDurdur();
-  // Chrome'un akışı başlatması için sessiz audio elemanı
-  audioEl = new Audio();
-  audioEl.muted = true;
-  audioEl.srcObject = stream;
+  lastStream = stream;
+  audioEl = new Audio(); audioEl.muted = true; audioEl.srcObject = stream;
   audioEl.play().catch(() => {});
-
   ctx.resume();
+
   const src = ctx.createMediaStreamSource(stream);
   const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 120;
   const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 7000;
+  analyser = ctx.createAnalyser(); analyser.fftSize = 1024;
+  buf = new Float32Array(analyser.fftSize);
+  gateN = ctx.createGain();
   const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -24; comp.ratio.value = 6; comp.attack.value = 0.003; comp.release.value = 0.25;
-  gain = ctx.createGain();
-  gain.gain.value = parseFloat($("vol").value);
-  const limiter = ctx.createDynamicsCompressor();
-  limiter.threshold.value = -3; limiter.ratio.value = 20; limiter.knee.value = 0;
+  comp.threshold.value = -24; comp.ratio.value = 6;
+  gainN = ctx.createGain();
+  const lim = ctx.createDynamicsCompressor();
+  lim.threshold.value = -3; lim.ratio.value = 20; lim.knee.value = 0;
 
-  chain = [src, hp, lp, comp, gain, limiter];
   const temiz = $("temiz").checked;
+  const dizi = temiz ? [hp, lp, gateN, comp, gainN, lim] : [comp, gainN, lim];
   let prev = src;
-  const dizi = temiz ? [hp, lp, comp, gain, limiter] : [comp, gain, limiter];
   dizi.forEach(n => { prev.connect(n); prev = n; });
+  src.connect(analyser);
   prev.connect(ctx.destination);
+  chain = [src, hp, lp, analyser, gateN, comp, gainN, lim];
+  sesiUygula();
+
+  gateTimer = setInterval(() => {
+    if (!analyser) return;
+    analyser.getFloatTimeDomainData(buf);
+    let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+    const db = 20 * Math.log10(Math.sqrt(s / buf.length) + 1e-9);
+    $("seviye").style.width = Math.max(0, Math.min(100, (db + 70) * 100 / 60)) + "%";
+    const now = performance.now();
+    if (db > parseFloat($("esik").value)) lastLoud = now;
+    const acik = !$("temiz").checked || (now - lastLoud < 400);
+    gateN.gain.setTargetAtTime(acik ? 1 : 0, ctx.currentTime, acik ? 0.01 : 0.12);
+  }, 40);
 }
 
-$("vol").addEventListener("input", () => { if (gain) gain.gain.value = parseFloat($("vol").value); });
-$("temiz").addEventListener("change", () => {
-  const live = Object.values(calls).find(c => c.remoteStream);
-  if (live) uzaktanCal(live.remoteStream);
-});
+function sesiUygula() {
+  if (gainN) gainN.gain.value = $("sessiz").checked ? 0 : parseFloat($("vol").value);
+}
+$("vol").addEventListener("input", sesiUygula);
+$("sessiz").addEventListener("change", sesiUygula);
+$("temiz").addEventListener("change", () => { if (lastStream) uzaktanCal(lastStream); });
 
 function ciz() {
   const l = $("liste");
-  const ids = [myId, ...Object.keys(conns)].filter(Boolean);
   l.innerHTML = "";
-  ids.forEach(id => {
+  [myId, ...Object.keys(conns)].filter(Boolean).forEach(id => {
     const r = document.createElement("div"); r.className = "row";
     const ben = id === myId;
     const ad = document.createElement("span");
     ad.textContent = (ben ? "Bu cihaz " : "Cihaz ") + kod(id) + (micId === id ? "  🎤" : "  🔊");
+    const bt = document.createElement("div"); bt.className = "btns";
     const b = document.createElement("button");
     b.textContent = micId === id ? "Mikrofon" : "Mikrofon yap";
     b.className = micId === id ? "on" : "alt";
     b.onclick = () => micSec(id);
-    r.append(ad, b); l.append(r);
+    bt.append(b);
+    if (!ben) {
+      const k = document.createElement("button");
+      k.textContent = "Kes"; k.className = "red";
+      k.onclick = () => ayril(id);
+      bt.append(k);
+    }
+    r.append(ad, bt); l.append(r);
   });
 }
+
+window.addEventListener("beforeunload", () => { try { peer.destroy(); } catch (e) {} });
 </script>
 </body>
 </html>
